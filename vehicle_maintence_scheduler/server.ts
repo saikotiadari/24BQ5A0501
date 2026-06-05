@@ -1,11 +1,17 @@
-const express = require('express');
-const axios = require('axios');
+import express, { Request, Response } from 'express';
+import axios from 'axios';
+import { requestLogger } from '../Logging_middleware/middleware';
+import { Log } from '../Logging_middleware/logger';
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(express.json());
+app.use(requestLogger);
+
 const BASE_URL = 'http://4.224.186.213/evaluation-service';
 
-const getAuthHeaders = (req) => {
+const getAuthHeaders = (req: Request) => {
     return {
         headers: {
             'Authorization': req.headers['authorization'] || ''
@@ -13,9 +19,20 @@ const getAuthHeaders = (req) => {
     };
 };
 
-function optimizeMaintenance(capacity, tasks) {
+interface VehicleTask {
+    TaskID: string;
+    Duration: number;
+    Impact: number;
+}
+
+interface Depot {
+    ID: number;
+    MechanicHours: number;
+}
+
+function optimizeMaintenance(capacity: number, tasks: VehicleTask[]) {
     const n = tasks.length;
-    const dp = Array(n + 1).fill(null).map(() => Array(capacity + 1).fill(0));
+    const dp: number[][] = Array(n + 1).fill(null).map(() => Array(capacity + 1).fill(0));
 
     for (let i = 1; i <= n; i++) {
         const currentTask = tasks[i - 1];
@@ -34,7 +51,7 @@ function optimizeMaintenance(capacity, tasks) {
         }
     }
 
-    const selectedTasks = [];
+    const selectedTasks: VehicleTask[] = [];
     let w = capacity;
     let totalImpact = dp[n][capacity];
     let totalDuration = 0;
@@ -56,14 +73,14 @@ function optimizeMaintenance(capacity, tasks) {
     };
 }
 
-app.get('/api/schedule/:depotId', async (req, res) => {
+app.get('/api/schedule/:depotId', async (req: Request, res: Response) => {
     try {
-        const depotId = parseInt(req.params.depotId);
+        const depotId = parseInt(String(req.params.depotId));
         const headers = getAuthHeaders(req);
 
         const [depotsResponse, vehiclesResponse] = await Promise.all([
-            axios.get(`${BASE_URL}/depots`, headers),
-            axios.get(`${BASE_URL}/vehicles`, headers)
+            axios.get<{ depots: Depot[] }>(`${BASE_URL}/depots`, headers),
+            axios.get<{ vehicles: VehicleTask[] }>(`${BASE_URL}/vehicles`, headers)
         ]);
 
         const depots = depotsResponse.data.depots;
@@ -71,22 +88,27 @@ app.get('/api/schedule/:depotId', async (req, res) => {
 
         const targetDepot = depots.find(d => d.ID === depotId);
         if (!targetDepot) {
+            await Log('backend', 'warn', 'route', `Depot lookup failed for ID: ${depotId}`);
             return res.status(404).json({ error: `Depot with ID ${depotId} not found.` });
         }
 
         const mechanicHoursLimit = targetDepot.MechanicHours;
         const result = optimizeMaintenance(mechanicHoursLimit, tasks);
 
+        await Log('backend', 'info', 'service', `Optimization complete for depot ${depotId}. Total impact: ${result.totalImpact}`);
+
         res.json({
             depotId,
             ...result
         });
 
-    } catch (error) {
-        console.error('Error computing vehicle schedules:', error.message);
+    } catch (error: any) {
+        const errMsg = error.response?.data || error.message;
+        await Log('backend', 'error', 'handler', `Scheduling endpoint crash: ${JSON.stringify(errMsg)}`);
+        
         res.status(error.response?.status || 500).json({
             error: 'Failed to evaluate maintenance schedules',
-            details: error.response?.data || error.message
+            details: errMsg
         });
     }
 });
